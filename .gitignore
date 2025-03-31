@@ -1,0 +1,6 @@
+.Rproj.user/
+.Rhistory
+.RData
+.DS_Store
+omnipathr-log
+output/Tables/Module_scores_with_metadata.csv
