@@ -1,0 +1,755 @@
+---
+title: "Hemorrhage Biopsies: Figures"
+output: html_document
+author: Naresh Doni Jayavelu
+---
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+## Load all necessary libraries
+
+```{r loadLibraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(Seurat)
+# library(DropletQC)
+# library(DropletUtils)
+library(patchwork)
+# library(monocle3)
+# library(scater)
+# library(apird)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(car)
+library(lme4)
+# library(garnett)
+library(ggrepel)
+library(ggrastr)
+library(dplyr)
+library(tidyverse)
+library(presto)
+library(kableExtra)
+library(liana)
+library(ggsignif)
+library(ggprism)
+
+
+
+options(stringsAsFactors = FALSE)
+set.seed(100)
+
+Csparse_validate = "CsparseMatrix_validate"
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Set up the directories
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/nareshdonijayavelu/Downloads/Projects_Naresh/Hemorrhage_Biopsies"
+outDir <- file.path(baseDir, "output")
+processed_dataDir <- file.path(baseDir, "processed_data")
+raw_dataDir <- file.path(baseDir, "raw_data/GSE266873_RAW")
+figDir <- file.path(outDir, "Figures")
+
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Read processed seurat object data
+
+```{r Read processed seurat object data}
+
+# read the seurat object
+load(file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_clusters_merged_250221.rda")) # seurat_obj_filtered_CCA_integrated_v3
+
+# add additional metadata
+seurat_obj_filtered_CCA_integrated_v3@meta.data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+  rownames_to_column(var = "cellbc") %>%
+  separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+  mutate(timePoint = case_when(
+    time %in% c("2h", "3h") ~ "G1",
+    time %in% c("12h") ~ "G2",
+    time %in% c("26h", "28h", "32h") ~ "G3",
+    TRUE ~ "Other" # Default case for unmatched values
+  )) %>%
+  column_to_rownames(var = "cellbc")
+
+
+seurat_obj_filtered_CCA_integrated_v3@meta.data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+  mutate(cell_type = new_cluster_names)
+
+Idents(seurat_obj_filtered_CCA_integrated_v3) <- seurat_obj_filtered_CCA_integrated_v3@meta.data$cell_type
+
+
+
+```
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Plot select genes (provided by Max) expression by time points across cell populations
+
+```{r Genes expression by timePoints by cell types}
+
+# load DEGs results
+load(file = file.path(processed_dataDir, "DEGs_cluster_timePoints.rda"))
+
+
+# SPP1, PTN, TNFA, MIF, CD44, TLR4, CD74, CXCL9, C3, LCK, CD70, CD80, NGF, PSTN, CXCR3, CHRNA7
+select_genes <- c("SPP1", "PTN", "TNFA", "MIF", "CD44", "TLR4", "CD74", "CXCL9", "C3", "LCK", "CD70", "CD80", "NGF", "PSTN", "CXCR3", "CHRNA7")
+# TNFA, PSTN are not present in the data
+
+col_sel <- c("NKTcells" = "#7F3C8DFF", "Bcells" = "#4B4B8FFF", "Microglia" = "#F2B701FF", "Monocytes" = "#F97B72FF", "Neutrophils" = "#11A579FF", 
+             "Endothelial" = "#A5AA99FF", "Astrocytes" = "#008695FF", "Oligodendrocytes" = "#AF6458FF", "NeuralProgenitors" = "#CF1C90FF")
+  
+  
+
+
+# seurat_obj = seurat_obj_filtered_CCA_integrated_v3
+# genes = c("SPP1", "PTN")
+# genes = "SPP1"
+# DEG_results = DEGs_cluster_timePoints
+# clusters = c("Oligodendrocytes")
+# plot_type = "violin"
+# group.by = "timePoint"
+# group.by.values = NULL
+# cluster.by = "cell_type"
+# colors = NULL
+# nrow = NULL
+# ncol = NULL
+# annotate_DEG = TRUE
+# raster = FALSE
+# pvalue_type = "significance"
+
+
+plot_expression_with_pvalues_prism <- function(seurat_obj, genes, clusters, DEG_results, 
+                                               plot_type = "violin", # "violin" or "boxplot"
+                                               group.by = "condition_donorGroup", 
+                                               group.by.values = NULL, cluster.by = "new_cluster_names", 
+                                               colors = NULL, nrow = NULL, ncol = NULL, 
+                                               annotate_DEG = FALSE, raster = FALSE, 
+                                               pvalue_type = "significance") {
+  
+  plot_function_single_gene_with_pvalue <- function(plot_data, DEG_results_k, plot_type = plot_type, colors = NULL) {
+    # Define facet layout
+    facet_formula <- gene~cluster
+    
+    # Select plot type: Violin or Boxplot
+    p <- ggplot(plot_data, aes(x = group, y = expression)) +
+      {if (plot_type == "violin") 
+        geom_violin(aes(fill = group), alpha = 0.5) 
+        else 
+          geom_boxplot(aes(fill = group), alpha = 0.5, outlier.size = 2)} +
+      stat_summary(fun = mean, geom = "crossbar", width = 0.5, color = "black", position = position_dodge(width = 0.9)) +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+            strip.text = element_text(size = 10),
+            axis.text.y = element_text(size = 12),
+            plot.title = element_text(size = 12, face = "bold"),
+            axis.title.x = element_text(size = 14),
+            axis.title.y = element_text(size = 14),
+            legend.position = "none") +
+      labs(x = "", y = "Expression", fill = group.by) +
+      facet_wrap(facet_formula, scales = "free_y")
+    
+    # Add custom colors if provided
+    if (!is.null(colors) && length(colors) == length(unique(plot_data$group))) {
+      p <- p + scale_fill_manual(values = colors) + 
+        scale_color_manual(values = colors)
+    }
+    
+    # Add p-value annotations if there are DEG results to annotate
+    if (annotate_DEG && nrow(DEG_results_k) > 0) {
+      DEG_results_k <- DEG_results_k %>%
+        mutate(label = sprintf("P: %.2g", p_val_adj))  # Use actual p-values for annotation
+      
+      # Assuming get_y_position exists (or define if necessary)
+      y_position <- get_y_position(
+        plot_data, 
+        formula = expression ~ group,  # Adjust this based on your data structure
+        step.increase = 0.5
+      ) %>%
+        select(group1, group2, y.position)
+      
+      df_p_val <- DEG_results_k %>%
+        inner_join(y_position) # Ensure this join is correct
+      
+      p <- p + add_pvalue(df_p_val, label = "label")
+    }
+    
+    return(p)
+  }
+  
+  # Check and filter missing genes
+  available_genes <- rownames(seurat_obj)
+  missing_genes <- setdiff(genes, available_genes)
+  if (length(missing_genes) > 0) {
+    warning("The following genes are not found in the Seurat object and will be skipped: ", 
+            paste(missing_genes, collapse = ", "))
+    genes <- intersect(genes, available_genes)
+  }
+  
+  # Check and filter missing clusters
+  available_clusters <- unique(seurat_obj@meta.data[[cluster.by]])
+  missing_clusters <- setdiff(clusters, available_clusters)
+  if (length(missing_clusters) > 0) {
+    warning("The following clusters are not found in the Seurat object and will be skipped: ", 
+            paste(missing_clusters, collapse = ", "))
+    clusters <- intersect(clusters, available_clusters)
+  }
+  
+  # Subset Seurat object to selected clusters
+  seurat_subset <- subset(seurat_obj, subset = !!sym(cluster.by) %in% clusters)
+  
+  # Warn and filter missing group.by values
+  available_groups <- unique(seurat_subset@meta.data[[group.by]])
+  if (!is.null(group.by.values)) {
+    missing_groups <- setdiff(group.by.values, available_groups)
+    if (length(missing_groups) > 0) {
+      warning("The following group.by values are not found and will be skipped: ", 
+              paste(missing_groups, collapse = ", "))
+      group.by.values <- intersect(group.by.values, available_groups)
+    }
+  } else {
+    group.by.values <- available_groups  # Use all available values if not specified
+  }
+  
+  # Subset metadata to include only selected group.by values
+  seurat_subset <- subset(seurat_subset, subset = !!sym(group.by) %in% group.by.values)
+  
+  # Fetch expression data
+  expression_data <- FetchData(seurat_subset, vars = c(genes, group.by, cluster.by))
+  
+  # Convert data to long format
+  plot_data_all <- expression_data %>%
+    pivot_longer(cols = all_of(genes), names_to = "gene", values_to = "expression") %>%
+    mutate(group = factor(!!sym(group.by), levels = group.by.values),
+           gene = factor(gene, levels = genes),
+           cluster = factor(!!sym(cluster.by), levels = clusters))
+  
+  plot_list <- list()  # Initialize empty list to store plots
+  
+  DEG_results <- DEG_results %>%
+    rename(gene = gene_name, cluster = cell_type,
+           group1 = ident_1, group2 = ident_2) %>%
+    mutate(xmin = case_when(
+      group1 == "G1" ~ "1",
+      group1 == "G2" ~ "2",
+      group1 == "G3" ~ "3",
+      TRUE ~ "Other" # Default case for unmatched values
+    )) %>%
+    mutate(xmax = case_when(
+      group2 == "G1" ~ "1",
+      group2 == "G2" ~ "2",
+      group2 == "G3" ~ "3",
+      TRUE ~ "Other" # Default case for unmatched values
+    ))
+    
+  
+  for (gene_k in genes){
+    for (cluster_k in clusters){
+      plot_data <- plot_data_all %>%
+        filter(gene == gene_k & cluster == cluster_k)
+      
+      DEG_results_filtered <- DEG_results %>%
+        filter(gene == gene_k & cluster == cluster_k)
+      
+      # Generate plot for the current gene and cluster
+      temp_plot <- plot_function_single_gene_with_pvalue(plot_data = plot_data, 
+                                                         DEG_results_k = DEG_results_filtered, 
+                                                         plot_type = plot_type, colors = colors)
+      
+      # Add the plot to the plot list
+      plot_list[[paste(gene_k, cluster_k, sep = "_")]] <- temp_plot
+    }
+  }
+  
+  return(plot_list)  # Return the list of plots
+}
+
+cell_types <- unique(seurat_obj_filtered_CCA_integrated_v3@meta.data$cell_type)
+pp = plot_expression_with_pvalues_prism(seurat_obj_filtered_CCA_integrated_v3, genes = select_genes, 
+                                   clusters = cell_types, DEG_results = DEGs_cluster_timePoints, 
+                                   plot_type = "violin", pvalue_type = "actual", group.by = "timePoint", annotate_DEG = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 9, nrow = 14)
+
+# To display the grid of plots
+print(combined_plot)
+
+
+filename_temp <- file.path(figDir, "Select_genes_expression_by_timePoints_by_celltype_with_Pvalues.pdf")
+
+ggsave(
+  filename = filename_temp,
+  width = 40,
+  height = 70,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+
+
+```
+
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Plot Modules (from monocle3) expression by time points across cell populations
+
+```{r module expression by timePoints by cell types}
+
+# load metadata with module expression data
+load(file = file.path(processed_dataDir, "meta_data_with_monocle3_module_scores.rda")) # meta_data_with_module_scores, module_ids
+
+# load module's P-values
+load(file = file.path(processed_dataDir, "Pvalues_SeuratModuleScores_timePoints.rda"))
+module_Pvalues <- Pvalues_SeuratModuleScores_timePoints$wilcox_results 
+
+
+
+plot_module_score_with_pvalues_prism <- function(meta_data, module_scores, clusters, module_Pvalues, 
+                                                 plot_type = "violin", # "violin" or "boxplot"
+                                                 group.by = "timePoint", 
+                                                 group.by.values = NULL, cluster.by = "new_cluster_names", 
+                                                 colors = NULL, nrow = NULL, ncol = NULL, 
+                                                 annotate_module = FALSE, raster = FALSE, 
+                                                 pvalue_type = "significance") {
+  
+  # function to plot single module expression with P-values
+  plot_function_single_gene_with_pvalue <- function(plot_data, module_Pvalues_k, plot_type = plot_type, colors = NULL) {
+    # Define facet layout
+    facet_formula <- ~module
+    
+    # Select plot type: Violin or Boxplot
+    p <- ggplot(plot_data, aes(x = group, y = score)) +
+      {if (plot_type == "violin") 
+        geom_violin(aes(fill = group), alpha = 0.5) 
+        else 
+          geom_boxplot(aes(fill = group), alpha = 0.5, outlier.size = 2)} +
+      stat_summary(fun = mean, geom = "crossbar", width = 0.5, color = "black", position = position_dodge(width = 0.9)) +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10),
+            strip.text = element_text(size = 10),
+            axis.text.y = element_text(size = 12),
+            plot.title = element_text(size = 12, face = "bold"),
+            axis.title.x = element_text(size = 14),
+            axis.title.y = element_text(size = 14),
+            legend.position = "none") +
+      labs(x = "", y = "Module score", fill = group.by) +
+      facet_wrap(facet_formula, scales = "free_y")
+    
+    # Add custom colors if provided
+    if (!is.null(colors) && length(colors) == length(unique(plot_data$group))) {
+      p <- p + scale_fill_manual(values = colors) + 
+        scale_color_manual(values = colors)
+    }
+    
+    # Add p-value annotations if there are DEG results to annotate
+    if (annotate_module && nrow(module_Pvalues_k) > 0) {
+      module_Pvalues_k <- module_Pvalues_k %>%
+        mutate(label = sprintf("P: %.2g", Adjusted_P_Value))  # Use actual p-values for annotation
+      
+      # Assuming get_y_position exists (or define if necessary)
+      y_position <- get_y_position(
+        plot_data, 
+        formula = score ~ group,  # Adjust this based on your data structure
+        step.increase = 0.2
+      ) %>%
+        dplyr::select(group1, group2, y.position)
+      
+      df_p_val <- module_Pvalues_k %>%
+        inner_join(y_position) # Ensure this join is correct
+      
+      p <- p + add_pvalue(df_p_val, label = "label")
+    }
+    
+    return(p)
+  }
+  
+  # make sure that modules and cell types are consistent.
+  if (!any(grepl(clusters, module_scores))) {
+    stop("Error: Make sure that modules and cell types are consistent")
+  }
+  
+  # Ensure module score columns exist in metadata
+  missing_modules <- setdiff(module_scores, colnames(meta_data))
+  if (length(missing_modules) > 0) {
+    warning("The following module scores are not found in the metadata and will be skipped: ", 
+            paste(missing_modules, collapse = ", "))
+    module_scores <- intersect(module_scores, colnames(meta_data))
+  }
+  
+  # Warn and filter missing clusters
+  available_clusters <- unique(meta_data[[cluster.by]])
+  missing_clusters <- setdiff(clusters, available_clusters)
+  if (length(missing_clusters) > 0) {
+    warning("The following clusters are not found in the metadata and will be skipped: ", 
+            paste(missing_clusters, collapse = ", "))
+    clusters <- intersect(clusters, available_clusters)
+  }
+  
+  # Subset metadata to selected clusters
+  meta_subset <- meta_data[meta_data[[cluster.by]] %in% clusters, ]
+  
+  # Warn and filter missing group.by values
+  available_groups <- unique(meta_subset[[group.by]])
+  if (!is.null(group.by.values)) {
+    missing_groups <- setdiff(group.by.values, available_groups)
+    if (length(missing_groups) > 0) {
+      warning("The following group.by values are not found and will be skipped: ", 
+              paste(missing_groups, collapse = ", "))
+      group.by.values <- intersect(group.by.values, available_groups)
+    }
+  } else {
+    group.by.values <- available_groups  # Use all available values if not specified
+  }
+  
+  # Subset metadata to include only selected group.by values
+  meta_subset <- meta_subset[meta_subset[[group.by]] %in% group.by.values, ]
+  
+  # Reshape metadata for plotting
+  plot_data_all <- meta_subset %>%
+    select(all_of(module_scores), all_of(group.by), all_of(cluster.by)) %>%
+    pivot_longer(cols = all_of(module_scores), names_to = "module", values_to = "score") %>%
+    mutate(group = factor(!!sym(group.by), levels = group.by.values),
+           module = factor(module, levels = module_scores),
+           cluster = factor(!!sym(cluster.by), levels = clusters))
+  
+  # filter modules to be included in the same cell type
+  plot_data_all <- plot_data_all %>% 
+    filter(str_detect(module, as.character(cluster)))
+  
+  # keep only valid modules and valid clusters
+  valid_modules <- plot_data_all %>%
+    pull(module) %>% unique()
+  
+  valid_clusters <- plot_data_all %>%
+    pull(cluster) %>% unique()
+  
+  
+  plot_list <- list()  # Initialize empty list to store plots
+  
+  module_Pvalues <- module_Pvalues %>%
+    dplyr::rename(module = Module, cluster = `Stratify_Group`,
+           group1 = Group1, group2 = Group2) %>%
+    mutate(xmin = case_when(
+      group1 == "G1" ~ "1",
+      group1 == "G2" ~ "2",
+      group1 == "G3" ~ "3",
+      TRUE ~ "Other" # Default case for unmatched values
+    )) %>%
+    mutate(xmax = case_when(
+      group2 == "G1" ~ "1",
+      group2 == "G2" ~ "2",
+      group2 == "G3" ~ "3",
+      TRUE ~ "Other" # Default case for unmatched values
+    ))
+  
+  
+  
+  for (module_k in valid_modules){
+    for (cluster_k in valid_clusters){
+      plot_data <- plot_data_all %>%
+        filter(module == module_k & cluster == cluster_k)
+      
+      module_Pvalues_filtered <- module_Pvalues %>%
+        filter(module == module_k & cluster == cluster_k)
+      
+      # Generate plot for the current gene and cluster
+      temp_plot <- plot_function_single_gene_with_pvalue(plot_data = plot_data, 
+                                                         module_Pvalues_k = module_Pvalues_filtered, 
+                                                         plot_type = plot_type, colors = colors)
+      
+      # Add the plot to the plot list
+      plot_list[[paste(module_k, cluster_k, sep = "_")]] <- temp_plot
+    }
+  }
+  
+  return(plot_list)  # Return the list of plots
+}
+
+table(meta_data_with_module_scores$new_cluster_names)
+
+# Astrocytes
+cell_type = "Astrocytes"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 6, nrow = 5)
+
+# To display the grid of plots
+print(combined_plot)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 25,
+  height = 25,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+table(meta_data_with_module_scores$new_cluster_names)
+
+# Oligodendrocytes
+cell_type = "Oligodendrocytes"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 7, nrow = 6)
+
+# To display the grid of plots
+print(combined_plot)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 30,
+  height = 30,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+table(meta_data_with_module_scores$new_cluster_names)
+
+# Microglia
+cell_type = "Microglia"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 10, nrow = 6)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 40,
+  height = 30,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+table(meta_data_with_module_scores$new_cluster_names)
+
+# Neutrophils
+cell_type = "Neutrophils"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 7, nrow = 2)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 30,
+  height = 10,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+table(meta_data_with_module_scores$new_cluster_names)
+
+# Monocytes
+cell_type = "Monocytes"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 6, nrow = 4)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 30,
+  height = 20,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+table(meta_data_with_module_scores$new_cluster_names)
+# NKTcells
+cell_type = "NKTcells"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 5, nrow = 1)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 25,
+  height = 5,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+table(meta_data_with_module_scores$new_cluster_names)
+# NeuralProgenitors
+cell_type = "NeuralProgenitors"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 6, nrow = 1)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 25,
+  height = 5,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+table(meta_data_with_module_scores$new_cluster_names)
+# Endothelial
+cell_type = "Endothelial"
+module_scores_select <- module_ids[grepl(cell_type, module_ids)]
+pp = plot_module_score_with_pvalues_prism(meta_data = meta_data_with_module_scores, 
+                                          module_scores = module_scores_select, 
+                                          clusters = cell_type, 
+                                          module_Pvalues = module_Pvalues, 
+                                          plot_type = "violin", pvalue_type = "actual", 
+                                          group.by = "timePoint", annotate_module = TRUE)
+
+
+# Create the grid
+combined_plot <- wrap_plots(pp, ncol = 2, nrow = 1)
+
+
+filename_temp <- file.path(figDir, paste0(cell_type, "_modules_expression_by_timePoints_with_Pvalues.pdf"))
+
+ggsave(
+  filename = filename_temp,
+  width = 8,
+  height = 5,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+
+
+
+```
+
+
+
+
+

@@ -1,0 +1,680 @@
+---
+title: "Hemorrhage Biopsies: QC, Integration and Cluster annotation"
+output: html_document
+author: Naresh Doni Jayavelu
+---
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+## Load all necessary libraries
+
+```{r loadLibraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(Seurat)
+# library(DropletQC)
+# library(DropletUtils)
+library(patchwork)
+# library(monocle3)
+# library(scater)
+# library(apird)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(car)
+library(lme4)
+# library(garnett)
+library(ggrepel)
+library(ggrastr)
+library(dplyr)
+library(tidyverse)
+library(presto)
+library(kableExtra)
+
+
+options(stringsAsFactors = FALSE)
+set.seed(100)
+
+Csparse_validate = "CsparseMatrix_validate"
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Set up the directories
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/nareshdonijayavelu/Downloads/Projects_Naresh/Hemorrhage_Biopsies"
+outDir <- file.path(baseDir, "output")
+processed_dataDir <- file.path(baseDir, "processed_data")
+raw_dataDir <- file.path(baseDir, "raw_data/GSE266873_RAW")
+
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+### Read the data and make seurat objects
+
+```{r Read the data and make seurat object}
+
+# Get a list of sample directories (only immediate subdirectories)
+sample_dirs <- list.dirs(raw_dataDir, recursive = FALSE)
+
+# Create an empty list to store Seurat objects
+seurat_obj_list <- list()
+
+# Loop through each sample directory and create Seurat objects
+for (sample_dir in sample_dirs) {
+  # Read 10X data
+  counts <- Read10X(data.dir = sample_dir)
+  
+  # Extract sample name from folder name
+  sample_name <- basename(sample_dir)
+  
+  # Create a Seurat object
+  seurat_obj <- CreateSeuratObject(counts = counts, project = sample_name)
+  
+  # Store sample name in metadata
+  seurat_obj$sample <- sample_name
+  
+  # Add Seurat object to the list
+  seurat_obj_list[[sample_name]] <- seurat_obj
+  
+  print(paste("Processed:", sample_name))
+}
+
+
+# add QC metrics
+for(i in 1:length(seurat_obj_list)){
+  seurat_obj <- seurat_obj_list[[i]]
+  seurat_obj[["Percent_MT"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+  seurat_obj[["Percent_RIBO"]] <- PercentageFeatureSet(seurat_obj, pattern = "^RP*")
+  seurat_obj[["Percent_HB"]] <- PercentageFeatureSet(seurat_obj, pattern = "^HB")
+  seurat_obj_list[[i]] <- seurat_obj
+}
+
+
+merged_seurat_obj <- scCustomize::Merge_Seurat_List(
+  seurat_obj_list,
+  add.cell.ids = LETTERS[1:length(seurat_obj_list)],
+  merge.data = TRUE,
+  project = "merged_cells")
+
+
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### QC stats and plots before filtering
+
+```{r QC stats and plots before filtering}
+
+# Extract metadata
+metadata_beforeQC <- merged_seurat_obj@meta.data
+
+# Calculate QC metrics
+beforeQC_metrics <- metadata_beforeQC %>%
+  dplyr::group_by(orig.ident) %>% # Group by sample identifier
+  dplyr::summarise(
+    num_cells = n(),                          # Number of cells
+    median_UMIs = median(nCount_RNA), # Median UMIs per cell
+    median_genes = median(nFeature_RNA), # Median genes per cell
+    median_MT = median(Percent_MT) # Min genes per cell
+  )
+
+
+beforeQC_metrics %>% mutate_if(is.numeric, round, 1) %>%
+  kbl() %>% kable_paper("hover", full_width = F, bootstrap_options = "condensed", font_size = 18)
+
+
+# QC plots
+
+generate_histogram_plot <- function(metadata, feature, bins = 50) {
+  # Validate input
+  if (!feature %in% colnames(metadata)) {
+    stop(sprintf("The feature '%s' is not a column in the provided metadata.", feature))
+  }
+  
+  # Calculate median values for the feature by group
+  temp_data <- metadata %>%
+    group_by(orig.ident) %>%
+    summarise(median_number = median(.data[[feature]], na.rm = TRUE))
+  
+  # Generate plot
+  temp_plot <- metadata %>%
+    ggplot(aes(x = .data[[feature]])) +
+    geom_histogram(bins = bins, color = "black", alpha = 0.7) + # Add histogram
+    facet_wrap(~orig.ident, nrow = 4) + # Facet by sample
+    geom_vline(data = temp_data, aes(xintercept = median_number), linetype = "dashed", color = "red") + # Median line
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 90, size = 16),
+      axis.text.y = element_text(size = 16),
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16),
+      legend.text = element_text(size = 14),
+      legend.title = element_blank(),
+      legend.position = "none"
+    ) +
+    labs(
+      x = feature,
+      y = "Cell Count",
+      title = sprintf("%s Distribution Across Samples", feature)
+    )
+  
+  # Return the plot
+  return(temp_plot)
+}
+
+umi_plot <- generate_histogram_plot(
+  metadata = metadata_beforeQC, 
+  feature = "nCount_RNA", 
+  bins = 50
+)
+
+gene_plot <- generate_histogram_plot(
+  metadata = metadata_beforeQC, 
+  feature = "nFeature_RNA", 
+  bins = 50
+)
+
+mt_plot <- generate_histogram_plot(
+  metadata = metadata_beforeQC, 
+  feature = "Percent_MT", 
+  bins = 50
+)
+
+ribo_plot <- generate_histogram_plot(
+  metadata = metadata_beforeQC, 
+  feature = "Percent_RIBO", 
+  bins = 50
+)
+
+hb_plot <- generate_histogram_plot(
+  metadata = metadata_beforeQC, 
+  feature = "Percent_HB", 
+  bins = 50
+)
+
+
+```
+
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### QC stats and plots after filtering
+
+```{r QC stats and plots after filtering}
+
+
+# remove bad QC cells
+
+quantile(metadata_beforeQC$nCount_RNA, probs = seq(0, 1, 0.01))
+quantile(metadata_beforeQC$nFeature_RNA, probs = seq(0, 1, 0.01))
+quantile(metadata_beforeQC$Percent_MT, probs = seq(0, 1, 0.01))
+
+qcMetricsThresholds <-
+  c(
+    "min_nFeature_RNA" = 500, # lower than this might have empty droplets
+    "max_nFeature_RNA" = 7000, # more than this would doublet cells
+    "max_nCount_RNA" = 66000, # to avoid outlier cells with high UMI counts
+    "percent_mito" = 10 # to remove dying/damaged cells
+  )
+
+
+seurat_obj <- merged_seurat_obj
+
+cellsAfterQCFilter <-
+  WhichCells(
+    seurat_obj,
+    expression = nFeature_RNA >= qcMetricsThresholds["min_nFeature_RNA"]) %>% 
+  # keeps 281 of 500
+  intersect(
+    WhichCells(
+      seurat_obj,
+      expression = nFeature_RNA <= qcMetricsThresholds["max_nFeature_RNA"])) %>% 
+  # keeps 279 of 281
+  intersect(
+    WhichCells(
+      seurat_obj, 
+      expression = Percent_MT <= qcMetricsThresholds["percent_mito"])) %>%
+  # keeps 255 of 281
+  intersect(
+    WhichCells(
+      seurat_obj,
+      expression = nCount_RNA <= qcMetricsThresholds["max_nCount_RNA"]))
+
+
+# Filter bad/low quality cells
+seurat_obj_filtered <- subset(seurat_obj, cells = cellsAfterQCFilter)
+seurat_obj_filtered
+
+
+# QC metrics
+
+# Extract metadata
+metadata_afterQC <- seurat_obj_filtered@meta.data
+
+
+# Calculate QC metrics
+afterQC_metrics <- metadata_afterQC %>%
+  dplyr::group_by(orig.ident) %>% # Group by sample identifier
+  dplyr::summarise(
+    num_cells = n(),                          # Number of cells
+    median_UMIs = median(nCount_RNA), # Median UMIs per cell
+    median_genes = median(nFeature_RNA), # Median genes per cell
+    median_MT = median(Percent_MT) # Min genes per cell
+  )
+
+
+afterQC_metrics %>% mutate_if(is.numeric, round, 1) %>%
+  kbl() %>% kable_paper("hover", full_width = F, bootstrap_options = "condensed", font_size = 18)
+
+# QC plots
+umi_plot <- generate_histogram_plot(
+  metadata = metadata_afterQC, 
+  feature = "nCount_RNA", 
+  bins = 50
+)
+
+gene_plot <- generate_histogram_plot(
+  metadata = metadata_afterQC, 
+  feature = "nFeature_RNA", 
+  bins = 50
+)
+
+mt_plot <- generate_histogram_plot(
+  metadata = metadata_afterQC, 
+  feature = "Percent_MT", 
+  bins = 50
+)
+
+ribo_plot <- generate_histogram_plot(
+  metadata = metadata_afterQC, 
+  feature = "Percent_RIBO", 
+  bins = 50
+)
+
+hb_plot <- generate_histogram_plot(
+  metadata = metadata_afterQC, 
+  feature = "Percent_HB", 
+  bins = 50
+)
+
+
+
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Normalization, Integration and Clustering 
+
+```{r Normalization Integration and Clustering }
+
+
+### Normalization and clustering 
+
+get_umap_metadata <- function(seurat_obj){
+  umap_df <- seurat_obj[["umap"]]@cell.embeddings %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column(var = "cell_id")
+  meta_df <- seurat_obj@meta.data %>% 
+  as.data.frame() %>% 
+  tibble::rownames_to_column(var = "cell_id")
+  df <- umap_df %>% 
+    inner_join(meta_df)
+  return(df)
+}
+
+
+# normalization and clustering
+seurat_obj_filtered_unintegrated <- NormalizeData(seurat_obj_filtered)
+seurat_obj_filtered_unintegrated <- FindVariableFeatures(seurat_obj_filtered_unintegrated)
+seurat_obj_filtered_unintegrated <- ScaleData(seurat_obj_filtered_unintegrated)
+seurat_obj_filtered_unintegrated <- RunPCA(seurat_obj_filtered_unintegrated)
+
+seurat_obj_filtered_unintegrated <- FindNeighbors(seurat_obj_filtered_unintegrated)
+seurat_obj_filtered_unintegrated <- FindClusters(seurat_obj_filtered_unintegrated, resolution = 0.4, cluster.name = "unintegrated_clusters")
+seurat_obj_filtered_unintegrated <- seurat_obj_filtered_unintegrated %>% RunUMAP(dims = 1:20)
+
+# Visualize umap
+DimPlot(seurat_obj_filtered_unintegrated, reduction = "umap", label = TRUE)
+DimPlot(seurat_obj_filtered_unintegrated, reduction = "umap", group.by = "orig.ident")
+DimPlot(seurat_obj_filtered_unintegrated, reduction = "umap", group.by = "orig.ident", split.by = "orig.ident")
+
+
+# save.image(file = file.path(processed_dataDir, "temp_250210.rda"))
+
+
+
+table(seurat_obj_filtered_unintegrated@meta.data$seurat_clusters)
+seurat_obj_filtered_CCA <- seurat_obj_filtered_unintegrated
+
+
+
+# marker genes
+# re-join layers after integration
+seurat_obj_filtered_unintegrated[["RNA"]] <- JoinLayers(seurat_obj_filtered_unintegrated[["RNA"]])
+
+cluster_markers_unintegrated <- FindAllMarkers(seurat_obj_filtered_unintegrated)
+
+# save(cluster_markers_unintegrated, file = file.path(outDir, "cluster_markers_unintegrated_v1_temp_250128.rda"))
+
+# load(file = file.path(outDir, "cluster_markers_unintegrated_v1_temp_250128.rda"))
+
+# Visualize umap
+# DimPlot(seurat_obj_filtered, reduction = "umap", label = TRUE)
+# DimPlot(seurat_obj_filtered, reduction = "umap", group.by = "orig.ident")
+# DimPlot(seurat_obj_filtered_ED_query, reduction = "umap", group.by = "orig.ident", split.by = "orig.ident")
+
+# run integration
+# reference_samples <- c("1_T179_Uninfected", "1_T194_Uninfected", "1_T1003_Uninfected", "1_T3027_Uninfected")
+# seurat_obj_filtered_CCA_integrated <- IntegrateLayers(object = seurat_obj_filtered_CCA, reference = reference_samples, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca", verbose = FALSE)
+
+# Error in getGlobalsAndPackages(expr, envir = envir, globals = globals) : 
+#   The total size of the 19 globals exported for future expression (‘FUN()’) is 16.99 GiB.. This exceeds the maximum allowed size of 500.00 MiB (option 'future.globals.maxSize'). The three largest globals are ‘FUN’ (16.57 GiB of class ‘function’), ‘reference’ (177.79 MiB of class ‘S4’) and ‘anchors’ (141.46 MiB of class ‘list’)
+# options(future.globals.maxSize = 20 * 1024^3) 
+
+# getOption("future.globals.maxSize") / 1024^3  # Convert to GB
+
+# seurat_obj_filtered_CCA[["RNA"]] <- split(seurat_obj_filtered_CCA[["RNA"]], f = seurat_obj_filtered_CCA$orig.ident)
+
+options(future.globals.maxSize = 16 * 1024^3) 
+
+seurat_obj_filtered_CCA_integrated <- IntegrateLayers(object = seurat_obj_filtered_CCA, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca", verbose = FALSE)
+
+# save(seurat_obj_filtered_CCA_integrated, file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_250210.rda"))
+
+# load(file = file.path(outDir, "seurat_obj_filtered_CCA_integrated_v1_temp_250128.rda"))
+
+
+# re-join layers after integration
+seurat_obj_filtered_CCA_integrated[["RNA"]] <- JoinLayers(seurat_obj_filtered_CCA_integrated[["RNA"]])
+
+seurat_obj_filtered_CCA_integrated <- FindNeighbors(seurat_obj_filtered_CCA_integrated, reduction = "integrated.cca", dims = 1:50)
+seurat_obj_filtered_CCA_integrated <- FindClusters(seurat_obj_filtered_CCA_integrated, resolution = 0.6)
+seurat_obj_filtered_CCA_integrated <- RunUMAP(seurat_obj_filtered_CCA_integrated, reduction = "integrated.cca", dims = 1:50, reduction.name = "umap.cca")
+
+# save(seurat_obj_filtered_CCA_integrated, file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_joined_layers_250211.rda"))
+
+table(seurat_obj_filtered_CCA_integrated@meta.data$seurat_clusters)
+
+DimPlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", group.by = "orig.ident", split.by = "orig.ident")
+DimPlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", label = TRUE)
+DimPlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", group.by = "orig.ident")
+
+
+# marker genes
+cluster_markers_CCA_integrated <- FindAllMarkers(seurat_obj_filtered_CCA_integrated)
+# save(cluster_markers_CCA_integrated, file = file.path(processed_dataDir, "cluster_markers_CCA_integrated_250211.rda"))
+
+
+
+# Oligodendrocytes
+oligo_markers <- c("MOG", "SOX10", "CNP", "HAPLN2")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = oligo_markers)
+
+# Microglia markers
+microglia_markers <- c("AIF1", "CSF1R", "TMEM119", "CX3CR1", "ADORA3")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = microglia_markers)
+
+# Astrocytes markers
+astro_markers <- c("AQP4", "ATP1B2", "ALDH1L1")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = astro_markers)
+
+
+# Neural progeniotors markers
+neural_markers <- c("CSPG4", "PDGFRA")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = neural_markers)
+
+# Monocytes markers
+mono_markers <- c("VCAN", "CD300E")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = mono_markers)
+
+# Neutrophils markers
+neut_markers <- c("CSF3R", "S100A8", "FCGR3B", "CXCR2")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = neut_markers)
+
+
+# NK/T markers
+nkt_markers <- c("CD3E", "CD3D", "GZMA", "GZMB", "NKG7")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = nkt_markers)
+
+
+# B cells markers
+b_markers <- c("MS4A1", "CD79A", "CD79B")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = b_markers)
+
+# Endothelial cells markers
+endo_markers <- c("EGFL7", "RGS5", "VWF", "CLDN5")
+FeaturePlot(seurat_obj_filtered_CCA_integrated, reduction = "umap.cca", features = endo_markers)
+
+
+
+
+
+
+# QC metrics by cluster
+UMAP_meta_CCA_ED <- get_umap_metadata(seurat_obj_filtered_CCA_integrated)
+
+QC_by_cluster_CCA_ED <- UMAP_meta_CCA_ED %>%
+  # group_by(new_cluster_names) %>%
+  group_by(seurat_clusters) %>%
+  summarise(count = n(),
+            median_PCT_MT = median(Percent_MT),
+            median_UMI_per_cell = median(nCount_RNA),
+            median_genes_per_cell = median(nFeature_RNA)
+            )
+library(kableExtra)
+QC_by_cluster_CCA_ED %>% mutate_if(is.numeric, round, 1) %>%
+  kbl() %>% kable_paper("hover", full_width = F, bootstrap_options = "condensed", font_size = 18)
+
+
+# QC metrics by sample
+QC_by_sample_CCA_ED <- UMAP_meta_CCA_ED %>%
+  # group_by(new_cluster_names) %>%
+  group_by(orig.ident) %>%
+  summarise(count = n(),
+            median_PCT_MT = median(Percent_MT),
+            median_UMI_per_cell = median(nCount_RNA),
+            median_genes_per_cell = median(nFeature_RNA)
+            )
+library(kableExtra)
+QC_by_sample_CCA_ED %>% mutate_if(is.numeric, round, 1) %>%
+  kbl() %>% kable_paper("hover", full_width = F, bootstrap_options = "condensed", font_size = 18)
+
+### sample level contribution to each cluster
+
+df_sample_cluster_CCA_ED <- UMAP_meta_CCA_ED %>%
+  group_by(seurat_clusters, orig.ident) %>%
+  summarise(Count_cells = n()) %>%
+  pivot_wider(names_from = orig.ident,
+              values_from = Count_cells)
+
+df_sample_cluster_CCA_ED %>% mutate_if(is.numeric, round, 1) %>%
+  kbl() %>% kable_paper("hover", full_width = F, bootstrap_options = "condensed", font_size = 12)
+
+
+df_sample_ED <- UMAP_meta_CCA_ED %>%
+  group_by(orig.ident) %>%
+  summarise(Count_cells = n()) %>%
+  pivot_wider(names_from = orig.ident,
+              values_from = Count_cells)
+
+df_sample_ED %>% mutate_if(is.numeric, round, 1) %>%
+  kbl() %>% kable_paper("hover", full_width = F, bootstrap_options = "condensed", font_size = 18)
+
+
+
+```
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### merging and re-naming clusters
+
+```{r DEGs comparing cold vs baseline visit}
+
+# load seurat object
+load(file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_joined_layers_250211.rda"))
+
+merge_and_renumber_clusters <- function(seurat_obj, clusters_to_merge_list) {
+  
+  # Get the current clusters
+  current_clusters <- Idents(seurat_obj)
+  
+  # Create a new vector to hold the new cluster IDs
+  new_clusters <- as.character(current_clusters)
+  
+  # Assign a unique temporary ID for each merged cluster
+  new_cluster_start_id <- length(unique(new_clusters))
+  
+  for (i in seq_along(clusters_to_merge_list)) {
+    clusters_to_merge <- clusters_to_merge_list[[i]]
+    merged_cluster_id <- new_cluster_start_id + i
+    new_clusters[which(current_clusters %in% clusters_to_merge)] <- as.character(merged_cluster_id)
+  }
+  
+  # Count the number of cells in each cluster
+  new_clusters_factor <- factor(new_clusters)
+  cluster_counts <- table(new_clusters_factor)
+  
+  # Sort clusters by cell count in decreasing order
+  sorted_clusters <- names(sort(cluster_counts, decreasing = TRUE))
+  
+  # Create new cluster IDs based on the sorted order
+  new_cluster_ids <- setNames(seq_along(sorted_clusters) - 1, sorted_clusters)
+  
+  # Map the old cluster IDs to the new ones
+  renumbered_clusters <- factor(new_clusters, levels = sorted_clusters, labels = new_cluster_ids)
+  
+  # Update the Seurat object with the new cluster IDs
+  # seurat_obj <- RenameIdents(seurat_obj, renumbered_clusters)
+  Idents(seurat_obj) <- renumbered_clusters
+  
+  return(seurat_obj)
+}
+
+
+# merge clusters belonging to same cell type
+# Oligodendrocytes = 0, 2, 3, 5, 9, 11, 16
+# Microglia cells = 1, 6, 12
+# Neutrophils = 4, 7
+# Monocytes = 14, 15
+
+
+
+
+seurat_obj_filtered_CCA_integrated_v2 <- merge_and_renumber_clusters(seurat_obj_filtered_CCA_integrated, list(c("0", "2", "3", "5", "9", "11", "16"), c("1", "6", "12"), c("4", "7"), c("14", "15")))
+
+
+DimPlot(seurat_obj_filtered_CCA_integrated_v2, reduction = "umap.cca", label = TRUE)
+cluster_merged_markers_CCA_integrated <- FindAllMarkers(seurat_obj_filtered_CCA_integrated_v2)
+# save(cluster_merged_markers_CCA_integrated, file = file.path(processed_dataDir, "cluster_merged_markers_CCA_integrated_250221.rda"))
+
+
+rename_clusters_and_save_metadata <- function(seurat_obj, id_mapping_df, metadata_column_name = "new_cluster_names") {
+  # Check if the data frame has the required columns
+  if (!all(c("old_cluster", "new_cluster") %in% colnames(id_mapping_df))) {
+    stop("The data frame must contain 'old_cluster' and 'new_cluster' columns.")
+  }
+  
+  # Get the current cluster IDs
+  current_clusters <- Idents(seurat_obj)
+  
+  # Create a mapping of old cluster IDs to new names
+  cluster_mapping <- setNames(id_mapping_df$new_cluster, id_mapping_df$old_cluster)
+  
+  # Check if all current clusters are present in the mapping
+  if (!all(unique(current_clusters) %in% names(cluster_mapping))) {
+    stop("Not all current cluster IDs are present in the provided mapping.")
+  }
+  
+  # Apply the new names to the Seurat object
+  new_clusters <- factor(current_clusters, levels = names(cluster_mapping), labels = cluster_mapping)
+  Idents(seurat_obj) <- new_clusters
+  
+  # Save the new cluster names in the metadata
+  seurat_obj[[metadata_column_name]] <- new_clusters
+  
+  # Return the updated Seurat object
+  return(seurat_obj)
+}
+
+
+
+id_mapping_df <- data.frame(
+  old_cluster = c(0, 1, 2, 3, 4, 5, 6, 7, 8),
+  new_cluster = c("Oligodendrocytes", "Microglia", "Neutrophils", "Astrocytes", "Monocytes", "NKTcells", "NeuralProgenitors", "Endothelial", "Bcells")
+)
+
+seurat_obj_filtered_CCA_integrated_v3 <- rename_clusters_and_save_metadata(seurat_obj_filtered_CCA_integrated_v2, id_mapping_df, metadata_column_name = "new_cluster_names")
+DimPlot(seurat_obj_filtered_CCA_integrated_v3, reduction = "umap.cca", label = TRUE, label.size = 4.5)
+
+cell_count_by_sample <- seurat_obj_filtered_ED_query_CCA_v2@meta.data %>%
+  group_by(orig.ident) %>%
+  summarise(count = n())
+
+# save(seurat_obj_filtered_CCA_integrated_v3, file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_clusters_merged_250221.rda"))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+

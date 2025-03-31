@@ -1,0 +1,393 @@
+---
+title: "Hemorrhage Biopsies: DEGs and Pathway Enrichments"
+output: html_document
+author: Naresh Doni Jayavelu
+---
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+## Load all necessary libraries
+
+```{r loadLibraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(Seurat)
+library(patchwork)
+# library(monocle3)
+# library(scater)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(car)
+library(lme4)
+# library(garnett)
+library(ggrepel)
+library(ggrastr)
+library(dplyr)
+library(tidyverse)
+library(presto)
+library(kableExtra)
+library(openxlsx)
+
+
+options(stringsAsFactors = FALSE)
+set.seed(100)
+
+Csparse_validate = "CsparseMatrix_validate"
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Set up the directories
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/nareshdonijayavelu/Downloads/Projects_Naresh/Hemorrhage_Biopsies"
+outDir <- file.path(baseDir, "output")
+processed_dataDir <- file.path(baseDir, "processed_data")
+raw_dataDir <- file.path(baseDir, "raw_data/GSE266873_RAW")
+
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Read processed seurat object data
+
+```{r Read processed seurat object data}
+
+# read the seurat object
+load(file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_clusters_merged_250221.rda")) # seurat_obj_filtered_CCA_integrated_v3
+
+# meta_data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+#   rownames_to_column(var = "cellbc") %>%
+#   separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+#   mutate(timePoint = case_when(
+#     time %in% c("2h", "3h") ~ "G1",
+#     time %in% c("12h") ~ "G2",
+#     time %in% c("26h", "28h", "32h") ~ "G3",
+#     TRUE ~ "Other" # Default case for unmatched values
+#   )) %>%
+#   column_to_rownames(var = "cellbc")
+
+
+seurat_obj_filtered_CCA_integrated_v3@meta.data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+  rownames_to_column(var = "cellbc") %>%
+  separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+  mutate(timePoint = case_when(
+    time %in% c("2h", "3h") ~ "G1",
+    time %in% c("12h") ~ "G2",
+    time %in% c("26h", "28h", "32h") ~ "G3",
+    TRUE ~ "Other" # Default case for unmatched values
+  )) %>%
+  column_to_rownames(var = "cellbc")
+
+
+
+```
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### DEG analysis comparing 3 timepoints, G1, G2 and G3
+
+```{r DEG analysis comparing 3 timepoints, G1, G2 and G3}
+
+perform_all_pairwise_DE <- function(seurat_obj, cluster_col, condition_col) {
+  # Ensure cluster column exists in metadata
+  if (!cluster_col %in% colnames(seurat_obj@meta.data)) {
+    stop("Cluster column not found in Seurat object metadata.")
+  }
+  
+  # Ensure condition column exists in metadata
+  if (!condition_col %in% colnames(seurat_obj@meta.data)) {
+    stop("Condition column not found in Seurat object metadata.")
+  }
+  
+  # Set identity class to condition column
+  Idents(seurat_obj) <- condition_col
+  
+  # Get unique clusters
+  cluster_ids <- unique(seurat_obj@meta.data[[cluster_col]])
+  
+  # Get all unique conditions
+  conditions <- unique(seurat_obj@meta.data[[condition_col]])
+  
+  # Generate all pairwise combinations
+  condition_pairs <- combn(conditions, 2, simplify = FALSE)
+  
+  # Create an empty list to store DEGs for each cluster and pairwise comparison
+  DEGs_cluster_list <- list()
+  
+  # Loop through each cluster
+  for (cluster_name in cluster_ids) {
+    # Subset the Seurat object for the given cluster
+    cluster_seurat_obj <- subset(seurat_obj, subset = !!as.name(cluster_col) == cluster_name)
+    
+    # Loop through each pairwise comparison
+    for (pair in condition_pairs) {
+      ident_1 <- pair[1]
+      ident_2 <- pair[2]
+      
+      # Perform differential expression analysis
+      cluster_DEG <- FindMarkers(cluster_seurat_obj, ident.1 = ident_1, ident.2 = ident_2)
+      
+      # Store results
+      DEGs_cluster_list[[paste(cluster_name, ident_1, ident_2, sep = "_vs_")]] <- cluster_DEG %>%
+        tibble::rownames_to_column(var = "gene_name") %>%
+        dplyr::mutate(
+          cell_type = cluster_name,
+          ident_1 = ident_1,
+          ident_2 = ident_2,
+          comparison = paste(ident_1, "vs", ident_2)
+        )
+      
+      # Print progress message using sprintf
+      message(sprintf("✅ DEG analysis '%s vs %s' completed for cell cluster '%s'", ident_1, ident_2, cluster_name))
+    }
+  }
+  
+  # Combine results into a single data frame
+  DEGs_cluster_df <- dplyr::bind_rows(DEGs_cluster_list)
+  
+  return(DEGs_cluster_df)
+}
+
+
+
+# all pairwise comparisons
+DEGs_cluster_timePoints <- perform_all_pairwise_DE(
+  seurat_obj = seurat_obj_filtered_CCA_integrated_v3,
+  cluster_col = "new_cluster_names",
+  condition_col = "timePoint"
+)
+
+# save(DEGs_cluster_timePoints, file = file.path(processed_dataDir, "DEGs_cluster_timePoints.rda"))
+# load(file = file.path(processed_dataDir, "DEGs_cluster_timePoints.rda"))
+
+# save to a csv file
+write_csv(x = DEGs_cluster_timePoints, file = file.path(outDir, "Tables/DEGs_by_timePoint_for_all_cell_types.csv"))
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Enrichment analysis 
+```{r Enrichment analysis, cache = TRUE}
+
+library(enrichR)
+perform_module_enrichment_analysis <- function(DEGs_cluster_df,
+                                               cluster_col = "cell_type",
+                                               gene_name_col = "gene_name",
+                                               p_val_adj_threshold = 0.05,
+                                               log2FC_threshold = 0.25,
+                                               pct_threshold = 0.1,
+                                               log2FC_direction = c("both", "positive", "negative"),
+                                               dbs_select = c(
+                                                 "GO_Biological_Process_2023",
+                                                 "GO_Cellular_Component_2023",
+                                                 "GO_Molecular_Function_2023",
+                                                 "KEGG_2021_Human",
+                                                 "MSigDB_Hallmark_2020",
+                                                 "Reactome_2022"
+                                               )) {
+  # Ensure valid log2FC direction input
+  log2FC_direction <- match.arg(log2FC_direction)
+  
+  # Check if Enrichr website is live
+  listEnrichrSites()
+  setEnrichrSite("Enrichr")
+  websiteLive <- TRUE
+  if (!websiteLive)
+    stop("Enrichr website is not available.")
+  
+  # Filter DEGs based on input thresholds and log2FC direction
+  # cluster_membership_df <- DEGs_cluster_df %>%
+  #   mutate(cluster = !!sym(cluster_col)) %>%
+  #   filter(p_val_adj < p_val_adj_threshold) %>%
+  #   filter(abs(avg_log2FC) > log2FC_threshold) %>%
+  #   filter(pct.1 > pct_threshold | pct.2 > pct_threshold)
+  
+  cluster_membership_df <- DEGs_cluster_df %>%
+    mutate(cluster = !!sym(cluster_col)) %>%
+    filter(
+      p_val_adj < p_val_adj_threshold,
+      abs(avg_log2FC) > log2FC_threshold,
+      pct.1 > pct_threshold | pct.2 > pct_threshold
+    ) %>%
+    mutate(FC_direction = if_else(avg_log2FC > 0, "Up", "Down")) %>%
+    distinct(gene_name, cluster, .keep_all = TRUE) %>%
+    mutate(cluster_id = paste0(cluster, "_", FC_direction)) %>%
+    mutate(cluster_id = paste0(cluster, "_", FC_direction)) %>%
+    dplyr::select(module = cluster_id,
+                  gene_name = !!sym(gene_name_col),
+                  FC_direction)
+  
+  if (log2FC_direction == "positive") {
+    cluster_membership_df <- cluster_membership_df %>%
+      filter(FC_direction == "Up")
+  } else if (log2FC_direction == "negative") {
+    cluster_membership_df <- cluster_membership_df %>%
+      filter(avg_log2FC == "Down")
+  } else if (log2FC_direction == "both") {
+    cluster_membership_df <- cluster_membership_df
+  }
+  
+  
+  # Calculate cluster size
+  cluster_size_df <- cluster_membership_df %>%
+    dplyr::rename(module_name = module) %>%
+    group_by(module_name) %>%
+    summarise(cluster_size = n())
+  
+  # Initialize list for enriched terms
+  module_names <- unique(cluster_size_df$module_name)
+  modules_enriched_terms_list <-
+    vector("list", length(module_names))
+  names(modules_enriched_terms_list) <- module_names
+  
+  for (k in seq_along(module_names)) {
+    cluster_select <- module_names[k]
+    genes_input <- cluster_membership_df %>%
+      filter(module == cluster_select) %>%
+      pull(gene_name)
+    
+    enriched_out <-
+      tryCatch(
+        enrichr(genes_input, dbs_select),
+        error = function(e)
+          NULL
+      )
+    
+    if (!is.null(enriched_out)) {
+      # Standardize column types and remove empty results
+      enriched_out <- purrr::map(enriched_out, ~ {
+        if (nrow(.) > 0) {
+          mutate(., across(everything(), as.character))
+        } else {
+          NULL
+        }
+      })
+      module_enriched <-
+        bind_rows(enriched_out, .id = "enrichment_category")
+      modules_enriched_terms_list[[k]] <- module_enriched
+    } else {
+      modules_enriched_terms_list[[k]] <- NULL
+    }
+    
+    cat(sprintf(
+      "Enrichment analysis completed for module: %s, k = %d\n",
+      cluster_select,
+      k
+    ))
+  }
+  
+  # Remove empty data frames and bind the results
+  modules_enriched_terms_list <-
+    modules_enriched_terms_list[!sapply(modules_enriched_terms_list, is.null)]
+  
+  if (length(modules_enriched_terms_list) == 0) {
+    stop("No enrichment results available.")
+  }
+  
+  modules_enriched_terms_bind_df <-
+    bind_rows(modules_enriched_terms_list, .id = "module_name") %>%
+    inner_join(cluster_size_df, by = "module_name") %>%
+    dplyr::relocate(cluster_size, .after = module_name)
+  
+  return(modules_enriched_terms_bind_df)
+}
+
+
+###########################################################################################
+#### Enrichment analysis on DEGs for all cell types for all pairwise comparisons ##########
+###########################################################################################
+
+
+DEGs_cluster_timePoints <- DEGs_cluster_timePoints %>%
+  mutate(celltype_comparison = paste0(cell_type, "_", ident_1, "_vs_", ident_2)) %>%
+  mutate(comparison = paste0(ident_1, "_vs_", ident_2))
+
+# count of DEGs
+sc_DEG_count_by_cluster <- DEGs_cluster_timePoints %>%
+  filter(p_val_adj < 0.01) %>%
+  filter(abs(avg_log2FC) > 0.25) %>%
+  filter(pct.1 > 0.1 | pct.2 > 0.1) %>%
+  mutate(FC_direction = if_else(sign(avg_log2FC) == 1, "Up", "Down")) %>%
+  group_by(cell_type, comparison, FC_direction) %>%
+  summarise(Count = n()) %>%
+  pivot_wider(names_from = FC_direction,
+              values_from = Count) %>%
+  replace_na(list(Up = 0, Down = 0)) %>%
+  mutate(total_DEGs = Up+Down) %>%
+  relocate(total_DEGs, .after = cell_type)
+
+
+# Perform enrichment analysis severe, nonSevere and healthy
+DEGs_enrich_terms_timePoints <- perform_module_enrichment_analysis(
+  DEGs_cluster_df = DEGs_cluster_timePoints,    # Data frame with DEGs and cluster information
+  cluster_col = "celltype_comparison", # column which has cluster and comparison
+  p_val_adj_threshold = 0.01,           # Adjusted p-value threshold
+  log2FC_threshold = 0.25,              # Log2 fold change threshold
+  pct_threshold = 0.1,                  # Percentage expression threshold
+  log2FC_direction = "both",        # Only consider upregulated DEGs
+  dbs_select = c("GO_Biological_Process_2023",
+                 "GO_Cellular_Component_2023",
+                 "GO_Molecular_Function_2023",
+                 "KEGG_2021_Human", 
+                 "MSigDB_Hallmark_2020", 
+                 "Reactome_2022")       # Databases for enrichment
+)
+
+
+DEGs_enrich_terms_timePoints <- DEGs_enrich_terms_timePoints %>%
+  select(-Old.P.value, -Old.Adjusted.P.value) %>%
+  mutate(P.value = as.numeric(P.value),
+         Adjusted.P.value = as.numeric(Adjusted.P.value)) %>%
+  rename(group = module_name,
+         group_size = cluster_size)
+
+save(DEGs_enrich_terms_timePoints, file = file.path(processed_dataDir, "DEGs_enriched_terms_timePoints.rda"))
+# load(file = file.path(processed_dataDir, "DEGs_enriched_terms_timePoints.rda"))
+
+# save to a csv file
+write_csv(x = DEGs_enrich_terms_timePoints, file = file.path(outDir, "Tables/Enriched_terms_for_DEGs_by_timePoint_for_all_cell_types.csv"))
+
+
+```
+
+
+
+

@@ -1,0 +1,197 @@
+---
+title: "Hemorrhage Biopsies: Cell composition across time points"
+output: html_document
+author: Naresh Doni Jayavelu
+---
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+## Load all necessary libraries
+
+```{r loadLibraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(Seurat)
+# library(DropletQC)
+# library(DropletUtils)
+library(patchwork)
+# library(monocle3)
+# library(scater)
+# library(apird)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(car)
+library(lme4)
+# library(garnett)
+library(ggrepel)
+library(ggrastr)
+library(dplyr)
+library(tidyverse)
+library(presto)
+library(kableExtra)
+library(liana)
+
+
+options(stringsAsFactors = FALSE)
+set.seed(100)
+
+Csparse_validate = "CsparseMatrix_validate"
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Set up the directories
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/nareshdonijayavelu/Downloads/Projects_Naresh/Hemorrhage_Biopsies"
+outDir <- file.path(baseDir, "output")
+processed_dataDir <- file.path(baseDir, "processed_data")
+raw_dataDir <- file.path(baseDir, "raw_data/GSE266873_RAW")
+
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Read processed seurat object data
+
+```{r Read processed seurat object data}
+
+# read the seurat object
+load(file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_clusters_merged_250221.rda")) # seurat_obj_filtered_CCA_integrated_v3
+
+# add additional metadata
+seurat_obj_filtered_CCA_integrated_v3@meta.data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+  rownames_to_column(var = "cellbc") %>%
+  separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+  mutate(timePoint = case_when(
+    time %in% c("2h", "3h") ~ "G1",
+    time %in% c("12h") ~ "G2",
+    time %in% c("26h", "28h", "32h") ~ "G3",
+    TRUE ~ "Other" # Default case for unmatched values
+  )) %>%
+  column_to_rownames(var = "cellbc")
+
+
+
+
+
+
+```
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Cell composition across time points
+
+```{r Cell composition}
+
+compute_cell_fractions_by_group <- function(seurat_obj, cluster_col, meta_col) {
+  # Extract metadata
+  metadata <- seurat_obj@meta.data
+  
+  # Check if the columns exist in the metadata
+  if (!all(c(cluster_col, meta_col) %in% colnames(metadata))) {
+    stop("Both cluster_col and meta_col should be present in the metadata.")
+  }
+  
+  # Compute cell fractions
+  cell_fractions <- metadata %>%
+    group_by(!!sym(meta_col), !!sym(cluster_col)) %>%
+    summarise(count = n()) %>%
+    ungroup() %>%
+    group_by(!!sym(meta_col)) %>%
+    mutate(fraction = count / sum(count)) %>%
+    select(!!sym(meta_col), !!sym(cluster_col), fraction) %>%
+    spread(!!sym(cluster_col), fraction, fill = 0)
+  
+  return(cell_fractions)
+}
+
+
+
+# Differences cell composition across time points
+cell_fractions_time_point <- compute_cell_fractions_by_group(seurat_obj_filtered_CCA_integrated_v3, 
+                                                         cluster_col = 'new_cluster_names', 
+                                                         meta_col = 'timePoint')
+
+# save to a csv file
+write_csv(x = cell_fractions_time_point, file = file.path(outDir, "Tables/mean_cell_fractions_by_timePoint_by_cell_types.csv"))
+
+
+
+# get the data in long format to plot
+plot_data <- cell_fractions_time_point %>%
+  gather(key = 'new_cluster_names', value = "fraction", -timePoint) %>%
+  mutate(new_cluster_names = factor(new_cluster_names, levels = c("NKTcells", "Bcells",
+                                                                  "Microglia", "Monocytes",
+                                                                  "Neutrophils", "Endothelial", 
+                                                                  "Astrocytes", "Oligodendrocytes",
+                                                                  "NeuralProgenitors")))
+
+
+col_sel <- c("NKTcells" = "#7F3C8DFF", "Bcells" = "#4B4B8FFF", "Microglia" = "#F2B701FF", "Monocytes" = "#F97B72FF", "Neutrophils" = "#11A579FF", 
+             "Endothelial" = "#A5AA99FF", "Astrocytes" = "#008695FF", "Oligodendrocytes" = "#AF6458FF", "NeuralProgenitors" = "#CF1C90FF")
+  
+  
+# Create barplot
+temp_plot <- plot_data %>% 
+  ggplot(aes(x = timePoint, y = fraction, fill = `new_cluster_names`)) +
+  geom_bar(stat = "identity", position = "fill") +
+  labs(x = "Time point", y = "Percent of cells", fill = "cell type") +
+  scale_y_continuous(labels = scales::percent) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, size = 16),
+        axis.text.y = element_text(size = 16),
+        # plot.title = element_text(size = 14, face = "bold"),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        legend.title = element_blank()) +
+  scale_fill_manual(values = col_sel)
+  
+
+
+filename_temp <- file.path(outDir, "Figures/Fig_Bar_plot_cell_composition_by_timePoint_by_cell_types.pdf")
+
+ggsave(
+  filename = filename_temp,
+  width = 5,
+  height = 4,
+  units = "in",
+  dpi = 300,
+)
+
+
+
+
+```

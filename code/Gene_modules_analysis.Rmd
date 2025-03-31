@@ -1,0 +1,468 @@
+---
+title: "Hemorrhage Biopsies: Gene module analysis"
+output: html_document
+author: Naresh Doni Jayavelu
+---
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+## Load all necessary libraries
+
+```{r loadLibraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(Seurat)
+library(patchwork)
+# library(monocle3)
+# library(scater)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(car)
+library(lme4)
+# library(garnett)
+library(ggrepel)
+library(ggrastr)
+library(dplyr)
+library(tidyverse)
+library(presto)
+library(kableExtra)
+library(liana)
+library(monocle3)
+library(SeuratWrappers)
+library(rstatix)
+library(clinfun)  # For Jonckheere-Terpstra test
+library(openxlsx)
+
+
+options(stringsAsFactors = FALSE)
+set.seed(100)
+
+Csparse_validate = "CsparseMatrix_validate"
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Set up the directories
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/nareshdonijayavelu/Downloads/Projects_Naresh/Hemorrhage_Biopsies"
+outDir <- file.path(baseDir, "output")
+processed_dataDir <- file.path(baseDir, "processed_data")
+raw_dataDir <- file.path(baseDir, "raw_data/GSE266873_RAW")
+
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Read processed seurat object data and DEGs data
+
+```{r Read processed seurat object data}
+
+# read the seurat object
+load(file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_clusters_merged_250221.rda")) # seurat_obj_filtered_CCA_integrated_v3
+
+seurat_obj_filtered_CCA_integrated_v3@meta.data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+  rownames_to_column(var = "cellbc") %>%
+  separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+  mutate(timePoint = case_when(
+    time %in% c("2h", "3h") ~ "G1",
+    time %in% c("12h") ~ "G2",
+    time %in% c("26h", "28h", "32h") ~ "G3",
+    TRUE ~ "Other" # Default case for unmatched values
+  )) %>%
+  column_to_rownames(var = "cellbc")
+
+
+# read DEGs list
+load(file = file.path(processed_dataDir, "DEGs_cluster_timePoints.rda")) # DEGs_cluster_timePoints
+
+
+
+```
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Identify gene modules within each cell type
+
+```{r Identify gene modules}
+
+# deg_list = DEGs_cluster_timePoints
+# cluster_col = "new_cluster_names"
+# resolution = 1e-3
+
+run_gene_modules_per_cluster <- function(seurat_obj, deg_list, cluster_col = "new_cluster_names", resolution = 1e-2) {
+ 
+  # Ensure DEG list has required columns
+  if (!all(c("gene_name", "cell_type", "p_val_adj", "avg_log2FC", "pct.1", "pct.2") %in% colnames(deg_list))) {
+    stop("DEG list must contain 'gene_name', 'cell_type', 'p_val_adj', 'avg_log2FC', pct.1' and 'pct.2' columns.")
+  }
+  
+  # Initialize an empty list to store results
+  all_results <- list()
+  
+  # Get unique clusters in Seurat object
+  unique_clusters <- unique(seurat_obj[[cluster_col]][, 1])
+  
+  for (cluster in unique_clusters) {
+    message(paste("Processing cluster:", cluster))
+    
+    # Get DEGs for the current cluster
+    cluster_degs <- deg_list %>%
+      filter(cell_type == cluster, p_val_adj < 0.01, abs(avg_log2FC) > 0.25) %>%
+      filter(pct.1 > 0.1 | pct.2 > 0.1) %>%
+      distinct(gene_name, .keep_all = TRUE) # Adjust thresholds as needed
+    
+    # Get gene names and filter only existing genes in Seurat object
+    deg_genes <- intersect(cluster_degs$gene_name, rownames(seurat_obj))
+    
+    # Check if any DEGs are found
+    if (length(deg_genes) < 20) {  # Check if enough genes are present
+      message(paste("Skipping cluster", cluster, "due to insufficient DEGs (", length(deg_genes), " genes)."))
+      next
+    }
+  
+    
+    # Subset Seurat object for the cluster
+    cluster_cells <- WhichCells(seurat_obj, ident = cluster)
+    seurat_subset <- subset(seurat_obj, cells = cluster_cells)
+    
+    # Convert to Monocle3 CDS
+    cds <- as.cell_data_set(seurat_subset)
+    
+    # Subset CDS to only include user-specified DEGs
+    cds <- cds[deg_genes, ]
+    
+    if (nrow(cds) == 0) {
+      message(paste("Skipping cluster", cluster, "as no DEGs are expressed."))
+      next
+    }
+    
+    # Preprocess and learn graph structure
+    cds <- preprocess_cds(cds, num_dim = 50)
+    cds <- reduce_dimension(cds, reduction_method = "UMAP")
+    cds <- cluster_cells(cds)
+    # cds@clusters$UMAP$partitions <- as.factor(rep(1, length(cds@clusters$UMAP$clusters)))  # Assign a partition
+    colData(cds)$assigned_cell_type <- as.character(partitions(cds))
+    
+    # Find gene modules
+    gene_module_tbl <- find_gene_modules(cds, resolution = resolution, random_seed = 100, cores = 4)
+    
+    # Add cluster information to results
+    gene_module_tbl$cluster <- cluster
+    
+    # Store results
+    all_results[[as.character(cluster)]] <- gene_module_tbl
+  }
+  
+  # Combine all results into one dataframe
+  final_results <- bind_rows(all_results)
+  
+  
+  return(final_results)
+}
+
+seurat_obj <- seurat_obj_filtered_CCA_integrated_v3 %>% subset(new_cluster_names == "Bcells")
+
+# test it on a single cell type
+# gene_module_results <- run_gene_modules_per_cluster(seurat_obj, deg_list = DEGs_cluster_timePoints)
+
+gene_module_results <- run_gene_modules_per_cluster(seurat_obj_filtered_CCA_integrated_v3, 
+                                                    deg_list = DEGs_cluster_timePoints, 
+                                                    cluster_col = "new_cluster_names", 
+                                                    resolution = 1e-2)
+
+# save(gene_module_results, file = file.path(processed_dataDir, "gene_module_results.rda"))
+load(file = file.path(processed_dataDir, "gene_module_results.rda")) # gene_module_results
+
+gene_module_definitions <- gene_module_results %>%
+  mutate(module_id = paste0(cluster, module)) %>%
+  dplyr::rename(gene_name = id)
+
+# save to a csv file
+write_csv(x = gene_module_definitions, file = file.path(outDir, "Tables/Gene_module_definitions_for_all_cell_types.csv"))
+
+
+# 
+# tt = gene_module_results %>%
+#   distinct(cluster, module, .keep_all = TRUE) %>%
+#   group_by(cluster, module) %>%
+#   summarise(count = n())
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Compute Seurat module (from Monocle3) scores
+```{r module scores, cache = TRUE}
+
+# format gene modules data to compute Seurat modules scores
+gene_modules_data <- gene_module_results %>%
+  mutate(module_id = paste0(cluster, module)) %>%
+  select(gene_name = id,
+         module_id) 
+  
+
+# Convert gene_modules_data into a list of gene sets
+gene_modules_list <- gene_modules_data %>%
+  split(.$module_id) %>%                # Group by module_id
+  lapply(function(x) x$gene_name)        # Extract gene names for each module
+
+
+# Compute module scores
+seurat_obj_filtered_CCA_integrated_v4 <- AddModuleScore(
+  object = seurat_obj_filtered_CCA_integrated_v3,
+  features = gene_modules_list,
+  name = "ModuleScore"
+)
+
+# change the colnames of default module scores to actual modules
+# Get the module IDs
+module_ids <- names(gene_modules_list)
+
+# Rename columns in metadata
+names(seurat_obj_filtered_CCA_integrated_v4@meta.data)[
+  (ncol(seurat_obj_filtered_CCA_integrated_v4@meta.data) - length(module_ids) + 1):ncol(seurat_obj_filtered_CCA_integrated_v4@meta.data)
+] <- module_ids
+
+meta_data_with_module_scores <- seurat_obj_filtered_CCA_integrated_v4@meta.data %>%
+  mutate(timePoint = case_when(
+    time %in% c("2h", "3h") ~ "G1",
+    time %in% c("12h") ~ "G2",
+    time %in% c("26h", "28h", "32h") ~ "G3",
+    TRUE ~ "Other" # Default case for unmatched values
+  )) %>%
+  mutate(timePoint = factor(timePoint, levels = c("G1", "G2", "G3")))
+# save(meta_data_with_module_scores, module_ids,  file = file.path(processed_dataDir, "meta_data_with_monocle3_module_scores.rda"))
+load(file = file.path(processed_dataDir, "meta_data_with_monocle3_module_scores.rda"))
+
+# save to a csv file
+write_csv(x = meta_data_with_module_scores, file = file.path(outDir, "Tables/Module_scores_with_metadata.csv"))
+
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Compute stats, P-values Seurat module (from monocle3) scores
+```{r Compute stats1, cache = TRUE}
+
+
+data = meta_data_with_module_scores
+module_cols = module_columns
+group_col = "timePoint"
+stratify_col = "new_cluster_names"
+test_type = "kruskal"
+# group_order = NULL
+group_order = c("G1", "G2", "G3")
+adjust_within_stratify = TRUE
+
+
+tt = ggplot(data = data_subset, aes(x = timePoint, y = Astrocytes1)) +
+  geom_violin()
+
+# functions to compute P-values by comparing module scores across 3 timepoints
+compare_module_scores <- function(data, module_cols, group_col, stratify_col, test_type = "kruskal",
+                                  group_order = NULL, adjust_within_stratify = TRUE) {
+  # Ensure required columns exist
+  if (!all(module_cols %in% colnames(data))) stop("Some module columns are missing in the data frame.")
+  if (!(group_col %in% colnames(data))) stop("Grouping column is missing in the data frame.")
+  if (!(stratify_col %in% colnames(data))) stop("Stratification column is missing in the data frame.")
+  if (!test_type %in% c("kruskal", "wilcox", "t_test", "jonckheere")) stop("Invalid test_type. Choose from 'kruskal', 'wilcox', 't_test', or 'jonckheere'.")
+
+  # Ensure group_order is provided for Jonckheere-Terpstra test
+  if (test_type == "jonckheere" & is.null(group_order)) {
+    stop("For Jonckheere-Terpstra test, please specify the 'group_order' argument.")
+  }
+
+  # Initialize results storage
+  all_results <- data.frame()
+
+  # Loop over each stratification group
+  for (strat_group in unique(data[[stratify_col]])) {
+    data_subset <- data %>% filter(.data[[stratify_col]] == strat_group)
+    
+    results_list <- list()  # Store results temporarily for this stratification group
+    
+    # restrict modules to a given cell type
+    module_cols_subset <- module_cols[stringr::str_detect(module_cols, as.character(strat_group))]
+
+    # Loop over each module column
+    for (mod in module_cols_subset) {
+      if (test_type == "kruskal") {
+        test_res <- kruskal_test(data_subset, formula(paste(mod, "~", group_col)))
+        test_res <- test_res %>% mutate(Group1 = "All", Group2 = "All") %>%
+          dplyr::rename(P_Value = p)
+      } else if (test_type == "jonckheere") {
+        data_subset[[group_col]] <- factor(data_subset[[group_col]], levels = group_order, ordered = TRUE)
+        test_result <- jonckheere.test(data_subset[[mod]], data_subset[[group_col]], alternative = "two.sided", nperm = 10000)
+        test_res <- tibble(method = "Jonckheere-Terpstra", Group1 = "Ordered", Group2 = "Ordered", P_Value = test_result$p.value)
+        # test_res <- tibble(method = "Jonckheere-Terpstra", Stratify_Group = strat_group, Group1 = "Ordered", Group2 = "Ordered", P_Value = test_result$p.value)
+      } else {
+        test_res <- pairwise_test(data_subset, mod, group_col, test_type)
+      }
+
+      test_res <- test_res %>% mutate(Module = mod, Stratify_Group = strat_group)
+      results_list[[mod]] <- test_res
+    }
+
+    # Combine results for this stratify_group
+    strat_results <- bind_rows(results_list)
+    all_results <- bind_rows(all_results, strat_results)
+  }
+
+  # **Apply p-value adjustment**
+  if (adjust_within_stratify) {
+    # Adjust p-values **within each stratification group**
+    all_results <- all_results %>%
+      group_by(Stratify_Group) %>%
+      mutate(Adjusted_P_Value = p.adjust(P_Value, method = "BH")) %>%
+      ungroup()
+  } else {
+    # Adjust p-values across **all comparisons together**
+    all_results <- all_results %>%
+      mutate(Adjusted_P_Value = p.adjust(P_Value, method = "BH"))
+  }
+
+  return(all_results)
+}
+
+# Function for Wilcoxon and t-test pairwise comparisons
+pairwise_test <- function(df, mod, group_col, test_type) {
+  if (test_type == "wilcox") {
+    res <- df %>% wilcox_test(reformulate(group_col, mod))
+  } else if (test_type == "t_test") {
+    res <- df %>% t_test(reformulate(group_col, mod))
+  }
+  res %>%
+    select(group1, group2, p) %>%
+    dplyr::rename(Group1 = group1, Group2 = group2, P_Value = p)
+}
+
+
+
+
+# load metadata with module scores
+load(file = file.path(processed_dataDir, "meta_data_with_monocle3_module_scores.rda")) # meta_data_with_module_scores, module_ids
+
+
+################################################################################
+### Compute P-values for Seurat module scores comparing across
+### 3 timpoints, G1, G2, G3 ######################
+################################################################################
+
+module_columns <- module_ids
+
+kruskal_results <-
+  compare_module_scores(
+    meta_data_with_module_scores,
+    module_cols = module_columns,
+    group_col = "timePoint",
+    stratify_col = "new_cluster_names",
+    test_type = "kruskal",
+    group_order = c("G1", "G2", "G3"),
+    adjust_within_stratify = TRUE
+  )
+
+
+wilcox_results <-
+  compare_module_scores(
+    meta_data_with_module_scores,
+    module_cols = module_columns,
+    group_col = "timePoint",
+    stratify_col = "new_cluster_names",
+    test_type = "wilcox",
+    group_order = c("G1", "G2", "G3"),
+    adjust_within_stratify = TRUE
+  )
+
+ttest_results <-
+  compare_module_scores(
+    meta_data_with_module_scores,
+    module_cols = module_columns,
+    group_col = "timePoint",
+    stratify_col = "new_cluster_names",
+    test_type = "t_test",
+    group_order = c("G1", "G2", "G3"),
+    adjust_within_stratify = TRUE
+  )
+
+Pvalues_SeuratModuleScores_timePoints <- list(kruskal_results = kruskal_results,
+                                              wilcox_results = wilcox_results,
+                                              ttest_results = ttest_results)
+
+save(Pvalues_SeuratModuleScores_timePoints, file = file.path(processed_dataDir, "Pvalues_SeuratModuleScores_timePoints.rda"))
+# load(file = file.path(processed_dataDir, "Pvalues_SeuratModuleScores_timePoints.rda"))
+
+### save to a xlsx file 
+# Create a new workbook
+wb <- openxlsx::createWorkbook()
+
+# Add data frames as sheets
+addWorksheet(wb, "kruskal_results")
+writeData(wb, "kruskal_results", Pvalues_SeuratModuleScores_timePoints$kruskal_results)
+
+addWorksheet(wb, "wilcox_results")
+writeData(wb, "wilcox_results", Pvalues_SeuratModuleScores_timePoints$wilcox_results)
+
+addWorksheet(wb, "ttest_results")
+writeData(wb, "ttest_results", Pvalues_SeuratModuleScores_timePoints$ttest_results)
+
+# Save the workbook
+saveWorkbook(wb, file = file.path(outDir, "Tables/Module_scores_by_timepoints_stats.xlsx"), overwrite = TRUE)
+
+
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+
+

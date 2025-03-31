@@ -1,0 +1,238 @@
+---
+title: "Hemorrhage Biopsies: CCC (Cell-Cell Communication) analysis "
+output: html_document
+author: Naresh Doni Jayavelu
+---
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+## Load all necessary libraries
+
+```{r loadLibraries, message=FALSE, warning=FALSE, echo=FALSE}
+library(Seurat)
+# library(DropletQC)
+# library(DropletUtils)
+library(patchwork)
+# library(monocle3)
+# library(scater)
+# library(apird)
+library(stringr)
+library(ggpubr)
+library(gridExtra)
+library(car)
+library(lme4)
+# library(garnett)
+library(ggrepel)
+library(ggrastr)
+library(dplyr)
+library(tidyverse)
+library(presto)
+library(kableExtra)
+library(liana)
+library(CellChat)
+
+
+options(stringsAsFactors = FALSE)
+set.seed(100)
+
+Csparse_validate = "CsparseMatrix_validate"
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Set up the directories
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/nareshdonijayavelu/Downloads/Projects_Naresh/Hemorrhage_Biopsies"
+outDir <- file.path(baseDir, "output")
+processed_dataDir <- file.path(baseDir, "processed_data")
+raw_dataDir <- file.path(baseDir, "raw_data/GSE266873_RAW")
+figDir <- file.path(outDir, "Figures")
+
+
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Read processed seurat object data
+
+```{r Read processed seurat object data}
+
+# read the seurat object
+load(file = file.path(processed_dataDir, "seurat_obj_filtered_CCA_integrated_clusters_merged_250221.rda")) # seurat_obj_filtered_CCA_integrated_v3
+
+# meta_data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+#   rownames_to_column(var = "cellbc") %>%
+#   separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+#   mutate(timePoint = case_when(
+#     time %in% c("2h", "3h") ~ "G1",
+#     time %in% c("12h") ~ "G2",
+#     time %in% c("26h", "28h", "32h") ~ "G3",
+#     TRUE ~ "Other" # Default case for unmatched values
+#   )) %>%
+#   column_to_rownames(var = "cellbc")
+
+
+seurat_obj_filtered_CCA_integrated_v3@meta.data <- seurat_obj_filtered_CCA_integrated_v3@meta.data %>%
+  rownames_to_column(var = "cellbc") %>%
+  separate(orig.ident, into = c("GEO_sampleid", "sample_number", "sample_number2", "temp", "time"), sep = "_", remove = FALSE) %>%
+  mutate(timePoint = case_when(
+    time %in% c("2h", "3h") ~ "G1",
+    time %in% c("12h") ~ "G2",
+    time %in% c("26h", "28h", "32h") ~ "G3",
+    TRUE ~ "Other" # Default case for unmatched values
+  )) %>%
+  column_to_rownames(var = "cellbc")
+
+
+
+
+
+
+```
+
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### CCC events using liana
+
+```{r CCC events liana}
+
+# show_resources()
+# show_methods()
+
+# if you want to run liana with default LR database from LIANA R package
+liana_results <- liana::liana_wrap(seurat_obj_filtered_CCA_integrated_v3)
+
+# rank aggregate liana results genereated from different methods
+liana_rank_aggregate <- liana::rank_aggregate(liana_res = liana_results)
+
+# save(liana_results, liana_rank_aggregate, file = file.path(processed_dataDir, "CCC_liana_results.rda"))
+
+# filter for significant L-R interactions
+liana_rank_aggregate_filtered <- liana_rank_aggregate %>%
+   # only keep interactions concordant between methods
+  filter(magnitude_rank <= 0.05) # note that these pvals are already corrected and we can use the "specificity_rank also for filtering"
+
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### CCC events using CellChat
+
+```{r CCC events CellChat}
+
+# create a cell chat object
+cellChat_obj <- createCellChat(object = seurat_obj_filtered_CCA_integrated_v3, group.by = "ident", assay = "RNA")
+
+# Set the ligand-receptor interaction database to human 
+CellChatDB <- CellChatDB.human # use CellChatDB.mouse if running on mouse data
+showDatabaseCategory(CellChatDB)
+
+# use all CellChatDB except for "Non-protein Signaling" for cell-cell communication analysis
+CellChatDB.use <- subsetDB(CellChatDB)
+
+# set the used database in the object
+cellChat_obj@DB <- CellChatDB.use
+
+# subset the expression data of signaling genes for saving computation cost
+cellChat_obj <- subsetData(cellChat_obj) # This step is necessary even if using the whole database
+future::plan("multisession", workers = 4) # do parallel
+cellChat_obj <- identifyOverExpressedGenes(cellChat_obj)
+
+# increase the future.globals.maxSize
+options(future.globals.maxSize = 4 * 1024^3)  # 4 GiB
+cellChat_obj <- identifyOverExpressedInteractions(cellChat_obj)
+# The number of highly variable ligand-receptor pairs used for signaling inference is 2066 
+#
+# project gene expression data onto PPI (Optional: when running it, USER should set `raw.use = FALSE` in the function `computeCommunProb()` in order to use the projected data)
+cellChat_obj <- smoothData(cellChat_obj, adj = PPI.human)
+
+# Compute the communication probability and infer cellular communication network
+cellChat_obj <- computeCommunProb(cellChat_obj, type = "triMean")
+
+
+# Infer the cell-cell communication at a signaling pathway level
+cellChat_obj <- computeCommunProbPathway(cellChat_obj)
+
+# Calculate the aggregated cell-cell communication network
+cellChat_obj <- aggregateNet(cellChat_obj)
+
+
+# save(cellChat_obj, file = file.path(processed_dataDir, "CCC_cellChat_obj.rda"))
+
+CCC_df <- subsetCommunication(cellChat_obj)
+
+# save to a csv file
+write_csv(x = CCC_df, file = file.path(outDir, "Tables/CCC_events_CellChat.csv"))
+
+
+
+```
+
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+### Visualize CCC events using CellChat
+
+```{r Visualize CCC events CellChat}
+
+cell_types <- unique(seurat_obj_filtered_CCA_integrated_v3@meta.data$new_cluster_names)
+pp <- netVisual_bubble(cellChat_obj, sources.use = cell_types, targets.use = cell_types, remove.isolate = FALSE, font.size = 12)
+
+filename_temp <- file.path(figDir,  "CellChat_CCC_events_all_cell_types.pdf")
+
+ggsave(
+  filename = filename_temp,
+  width = 25,
+  height = 120,
+  units = "in",
+  dpi = 300,
+  limitsize = FALSE
+)
+
+
+```
+
+
+
